@@ -389,7 +389,7 @@ def opencv_main(args):
     
     def custom_init(self):
         # 调用原始初始化函数
-        self.original_init()
+        DetectionCore.original_init(self)
         
         # 设置稳定性阈值
         self.stability_threshold = args.stability

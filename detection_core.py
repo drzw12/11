@@ -33,11 +33,11 @@ class DetectionCore:
         # 多垃圾处理相关配置
         self.multi_garbage_mode = False  # 默认关闭多垃圾模式
         self.same_category_threshold = 2  # 检测到多少个相同类别的垃圾才触发多垃圾模式
-        self.multi_garbage_radius = 150  # 多个垃圾的最大半径范围（像素）
+        self.multi_garbage_radius = 100  # 多个垃圾的最大半径范围（像素）- 降低半径范围
         self.multi_garbage_category = None  # 当前多垃圾模式下的垃圾类别
         self.multi_garbage_items = []  # 多垃圾模式下的垃圾项目列表
         self.same_type_garbage_enabled = True  # 启用同类型垃圾批量处理
-        self.multi_garbage_distance_threshold = 200  # 同类型垃圾的距离阈值，小于此值视为同一组
+        self.multi_garbage_distance_threshold = 80  # 同类型垃圾的距离阈值，小于此值视为同一组 - 降低距离阈值
         self.garbage_groups = {}  # 用于存储分组后的垃圾 {category: [[item1, item2, ...], [item3, item4, ...]]}
         self.garbage_by_category = {
             "可回收物": [],
@@ -45,6 +45,8 @@ class DetectionCore:
             "厨余垃圾": [],
             "其他垃圾": []
         }  # 按类别存储的垃圾
+        self.min_garbage_size = 20  # 最小垃圾尺寸（像素），小于此值的检测结果会被过滤
+        self.force_single_garbage = False  # 强制单垃圾模式，即使检测到多个垃圾也分开处理
 
         # ROI区域设置
         self.roi_enabled = False  # 是否启用ROI检测
@@ -169,10 +171,6 @@ class DetectionCore:
 
         # 添加更多重试设置
         self.max_retries = 3  # 最大重试次数，超过后跳过当前垃圾
-        
-        # 添加延迟检测相关变量
-        self.delay_detection = False  # 是否处于延迟检测状态
-        self.next_detection_time = 0  # 下一次可以检测的时间
 
     def open_camera(self):
         try:
@@ -221,45 +219,9 @@ class DetectionCore:
         if hasattr(self, 'update_fps'):
             self.update_fps()
             
-        # 检查串口响应
+            # 检查串口响应
         if hasattr(self, '_check_serial_response'):
             self._check_serial_response()
-            
-        # 检查是否处于延迟检测状态
-        if hasattr(self, 'delay_detection') and self.delay_detection:
-            current_time = time.time()
-            if current_time < self.next_detection_time:
-                # 还在延迟期内，不进行检测，只显示基本信息
-                display_frame = frame.copy()
-                
-                # 显示倒计时信息
-                remaining_time = round(self.next_detection_time - current_time, 1)
-                countdown_text = f"等待继续检测: {remaining_time}秒"
-                cv2.putText(display_frame, countdown_text, (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                
-                # 显示基本信息
-                if self.platform_scan_mode and hasattr(self, 'draw_platform_scan_info'):
-                    self.draw_platform_scan_info(display_frame)
-                    
-                if hasattr(self, 'draw_fps'):
-                    self.draw_fps(display_frame)
-                    
-                if hasattr(self, 'roi_enabled') and self.roi_enabled and hasattr(self, 'roi') and self.roi and hasattr(self, 'draw_roi'):
-                    self.draw_roi(display_frame)
-                    
-                return display_frame, []
-            else:
-                # 延迟结束，重置状态并继续检测
-                self.delay_detection = False
-                self.confirmed = False  # 重要：重置确认状态，允许新的垃圾被检测
-                
-                # 平台扫描模式下，继续处理下一个垃圾
-                if self.platform_scan_mode and not self.transmission_complete:
-                    print("延迟结束，继续处理下一个垃圾")
-                    if hasattr(self, '_transmit_next'):
-                        self._transmit_next()
-                    else:
-                        print("缺少_transmit_next方法，无法继续传输")
             
         # 检查STM32响应超时
         if self.waiting_stm32 and hasattr(self, 'stm32_response_time') and time.time() - self.stm32_response_time > self.stm32_timeout:
@@ -295,7 +257,7 @@ class DetectionCore:
             # 自动模式处理逻辑
             if self.auto_mode:
                 # 如果已完成传输并且不在等待响应状态，检查是否应该开始新的扫描
-                if self.transmission_complete and not self.waiting_stm32 and not self.delay_detection:
+                if self.transmission_complete and not self.waiting_stm32:
                     # 检查是否达到扫描间隔时间
                     if hasattr(self, 'last_scan_time') and time.time() - self.last_scan_time > 3:  # 3秒间隔
                         print("开始新一轮自动扫描")
@@ -321,7 +283,7 @@ class DetectionCore:
                 # 处理状态下的逻辑
                 elif self.auto_state == "processing":
                     # 如果存在传输顺序但尚未开始传输，开始传输第一个垃圾
-                    if hasattr(self, 'transmission_order') and self.transmission_order and self.current_transmission_index == 0 and not self.waiting_stm32 and not self.delay_detection:
+                    if hasattr(self, 'transmission_order') and self.transmission_order and self.current_transmission_index == 0 and not self.waiting_stm32:
                         print("开始传输第一个垃圾")
                         if hasattr(self, '_transmit_next'):
                             self._transmit_next()
@@ -348,7 +310,7 @@ class DetectionCore:
                 cv2.putText(temp_frame, f"ROI: {w}x{h}", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
                 return temp_frame, []
         
-        # 对当前帧进行目标检测
+                # 对当前帧进行目标检测
         detections = []
         if self.platform_scan_mode:
             # 在全平台扫描模式下使用detect_all方法
@@ -366,7 +328,7 @@ class DetectionCore:
             detections = self.detect(roi_frame)
             
             # 检查是否有多个相同类型的垃圾
-            if hasattr(self, 'check_multi_garbage') and not self.delay_detection:
+            if hasattr(self, 'check_multi_garbage'):
                 has_multi, multi_category, multi_position, is_multi = self.check_multi_garbage(detections)
                 if has_multi and not self.confirmed and not self.waiting_stm32:
                     print(f"检测到多个相同类型的{multi_category}，位置: {multi_position}")
@@ -381,7 +343,7 @@ class DetectionCore:
                     self.draw_detection(display_frame, det)
                     
                 # 在非全平台模式下，检查是否符合类别确认条件
-                if not self.platform_scan_mode and not self.confirmed and not self.waiting_stm32 and not self.delay_detection:
+                if not self.platform_scan_mode and not self.confirmed and not self.waiting_stm32:
                     category = det['category']
                     if hasattr(self, 'check_category') and self.check_category(category):
                         x, y = det['position']
@@ -442,20 +404,21 @@ class DetectionCore:
                 
                 # 明确检查是否包含'1'字符
                 if '1' in response_str:
-                    print("接收到STM32完成信号'1'，等待3秒后继续处理下一个垃圾")
+                    print("接收到STM32完成信号'1'，可以继续处理下一个垃圾")
                     self.waiting_stm32 = False  # 重置等待状态
                     self.retry_count = 0
-                    
-                    # 设置延迟检测时间
-                    self.next_detection_time = time.time() + 3.0  # 设置3秒后才能检测
-                    self.delay_detection = True  # 标记为延迟检测状态
+                    self.confirmed = False      # 重要：重置确认状态，允许新的垃圾被检测
                     
                     # 重置所有计数，准备处理下一个垃圾
                     self._reset_counts()
                     
-                    # 平台扫描模式下，设置延迟后继续处理下一个垃圾
+                    # 平台扫描模式下，继续处理下一个垃圾
                     if self.platform_scan_mode and not self.transmission_complete:
-                        print("平台扫描模式：将在3秒后继续处理下一个垃圾")
+                        print("平台扫描模式：继续处理下一个垃圾")
+                        if hasattr(self, '_transmit_next'):
+                            self._transmit_next()
+                        else:
+                            print("缺少_transmit_next方法，无法继续传输")
                     
                     # 记录日志，便于调试
                     with open("stm32_response.log", "a") as f:
@@ -708,14 +671,14 @@ class DetectionCore:
                     category = self.categories[id]
 
                     # 添加检测结果
-                        detection_info = {
+                    detection_info = {
                             'box': box,
                             'category': category,
                             'confidence': conf,
                         'position': (center_x, center_y),
                             'is_small': is_small_object
                         }
-                        detections.append(detection_info)
+                    detections.append(detection_info)
 
         # 如果没有检测到物体，重置状态
         if len(boxes) == 0:
@@ -963,12 +926,12 @@ class DetectionCore:
         """处理平台上所有检测到的垃圾，按类别分类并统计数量"""
         # 确保garbage_by_category已初始化
         if not hasattr(self, 'garbage_by_category') or self.garbage_by_category is None:
-        self.garbage_by_category = {
-            "可回收物": [],
-            "有害垃圾": [],
-            "厨余垃圾": [],
-            "其他垃圾": []
-        }
+            self.garbage_by_category = {
+                "可回收物": [],
+                "有害垃圾": [],
+                "厨余垃圾": [],
+                "其他垃圾": []
+            }
         else:
             # 清空之前的分类结果
             for category in self.garbage_by_category:
@@ -976,7 +939,7 @@ class DetectionCore:
 
         # 获取稳定的检测结果
         if hasattr(self, '_get_stable_detections'):
-        stable_detections = self._get_stable_detections()
+            stable_detections = self._get_stable_detections()
         else:
             # 如果没有稳定检测方法，使用platform_detections
             stable_detections = self.platform_detections if hasattr(self, 'platform_detections') and self.platform_detections else []
@@ -988,16 +951,16 @@ class DetectionCore:
             confidence = detection['confidence']
             # 将垃圾信息添加到对应类别
             if category in self.garbage_by_category:
-            self.garbage_by_category[category].append({
-                'position': position,
-                'box': detection['box'],
-                'confidence': confidence
-            })
+                self.garbage_by_category[category].append({
+                    'position': position,
+                    'box': detection['box'],
+                    'confidence': confidence
+                })
 
         # 按置信度对每类垃圾进行排序（从高到低）
         for category in self.garbage_by_category:
             if self.garbage_by_category[category]:
-            self.garbage_by_category[category].sort(key=lambda x: x['confidence'], reverse=True)
+                self.garbage_by_category[category].sort(key=lambda x: x['confidence'], reverse=True)
 
         # 对垃圾进行分组处理
         if hasattr(self, '_group_same_type_garbage'):
@@ -1081,23 +1044,46 @@ class DetectionCore:
                 self.auto_state = "scanning"
             return False
 
-        # 如果只检测到一种垃圾，直接使用
-        if len(valid_categories) == 1:
-            print(f"只检测到一种垃圾: {valid_categories[0][0]}")
-            self.transmission_order = [valid_categories[0][0]]
-        else:
-            # 检测到多种垃圾，优先处理数量最少的，对于数量相同的，优先处理置信度高的
-            sorted_categories = sorted(valid_categories, key=lambda x: (x[1], -x[2]))
-            self.transmission_order = [cat for cat, _, _ in sorted_categories]
-
-        print(f"传输顺序: {self.transmission_order}")
+        # 按照数量从少到多排序，对于相同数量的类别，按照置信度从高到低排序
+        valid_categories.sort(key=lambda x: (x[1], -x[2]))
+        
+        # 生成传输顺序
+        self.transmission_order = [cat for cat, _, _ in valid_categories]
+        
+        # 初始化传输索引
         self.current_transmission_index = 0
+        
+        # 初始化组索引字典
+        self.current_group_indices = {cat: 0 for cat, _, _ in valid_categories}
+        
+        # 初始化单垃圾模式的项目索引
+        self.current_item_indices = {cat: 0 for cat, _, _ in valid_categories}
+        
+        # 重置传输完成标志
         self.transmission_complete = False
         
-        # 准备组索引字典，用于跟踪每个类别当前处理到哪个组
-        self.current_group_indices = {cat: 0 for cat in self.transmission_order}
+        # 打印传输顺序
+        print(f"垃圾传输顺序: {self.transmission_order}")
         
-        # 开始第一个传输
+        # 打印每个类别的垃圾数量和分组情况
+        for category in self.transmission_order:
+            items = self.garbage_by_category.get(category, [])
+            print(f"{category}: {len(items)}个垃圾")
+            
+            # 打印分组情况
+            if hasattr(self, 'garbage_groups') and category in self.garbage_groups:
+                groups = self.garbage_groups[category]
+                print(f"  分组情况: {len(groups)}个组")
+                
+                # 在强制单垃圾模式下，计算总垃圾数
+                if hasattr(self, 'force_single_garbage') and self.force_single_garbage:
+                    total_items = sum(len(group) for group in groups)
+                    print(f"  强制单垃圾模式: 将处理{total_items}个独立垃圾")
+                else:
+                    for i, group in enumerate(groups):
+                        print(f"    组 {i+1}: {len(group)}个垃圾")
+                        
+        # 开始传输第一个垃圾
         if hasattr(self, '_transmit_next'):
         return self._transmit_next()
         else:
@@ -1122,6 +1108,10 @@ class DetectionCore:
         # 确保transmission_complete已定义
         if not hasattr(self, 'transmission_complete'):
             self.transmission_complete = False
+            
+        # 确保current_item_indices已定义 - 用于跟踪组内当前处理的物体索引
+        if not hasattr(self, 'current_item_indices'):
+            self.current_item_indices = {}
         
         if self.current_transmission_index >= len(self.transmission_order):
             print("所有垃圾信息已传输完成，重新开始扫描")
@@ -1155,54 +1145,94 @@ class DetectionCore:
         is_multi_garbage = False
         group_position = None
         
-        if hasattr(self, 'garbage_groups') and current_category in self.garbage_groups and self.garbage_groups[current_category]:
-            # 获取当前类别的分组
-            groups = self.garbage_groups[current_category]
-            
-            # 检查当前组索引是否有效
-            if current_category in self.current_group_indices:
-                current_group_index = self.current_group_indices[current_category]
+        # 强制单垃圾模式处理逻辑
+        if hasattr(self, 'force_single_garbage') and self.force_single_garbage:
+            # 初始化当前类别的item索引
+            if current_category not in self.current_item_indices:
+                self.current_item_indices[current_category] = 0
                 
-                # 如果当前组索引有效
-                if 0 <= current_group_index < len(groups):
-                    current_group = groups[current_group_index]
+            # 获取该类别的所有垃圾项目
+            all_items = []
+            if hasattr(self, 'garbage_groups') and current_category in self.garbage_groups:
+                # 从所有组中提取单个垃圾项目
+                for group in self.garbage_groups[current_category]:
+                    all_items.extend(group)
+            elif items:
+                all_items = items
+                
+            # 如果没有垃圾项目，移动到下一个类别
+            if not all_items:
+                self.current_transmission_index += 1
+                return self._transmit_next()
+                
+            # 获取当前要处理的垃圾项目索引
+            current_item_idx = self.current_item_indices[current_category]
+            
+            # 检查是否已处理完该类别的所有垃圾
+            if current_item_idx >= len(all_items):
+                # 该类别的所有垃圾都已处理完，移动到下一个类别
+                self.current_transmission_index += 1
+                return self._transmit_next()
+                
+            # 获取当前要处理的垃圾项目
+            current_item = all_items[current_item_idx]
+            group_position = current_item['position']
+            
+            print(f"强制单垃圾模式: 处理{current_category}的第{current_item_idx+1}/{len(all_items)}个垃圾，位置={group_position}")
+            
+            # 更新索引，为下一次传输准备
+            self.current_item_indices[current_category] = current_item_idx + 1
+            
+        else:
+            # 原有的多垃圾分组处理逻辑
+            if hasattr(self, 'garbage_groups') and current_category in self.garbage_groups and self.garbage_groups[current_category]:
+                # 获取当前类别的分组
+                groups = self.garbage_groups[current_category]
+                
+                # 检查当前组索引是否有效
+                if current_category in self.current_group_indices:
+                    current_group_index = self.current_group_indices[current_category]
                     
-                    # 如果组内有多个垃圾，设置多垃圾标志
-                    if hasattr(self, 'same_category_threshold') and len(current_group) >= self.same_category_threshold:
-                        is_multi_garbage = True
+                    # 如果当前组索引有效
+                    if 0 <= current_group_index < len(groups):
+                        current_group = groups[current_group_index]
                         
-                        # 计算该组的中心点作为位置
-                        center_x = sum(item['position'][0] for item in current_group) / len(current_group)
-                        center_y = sum(item['position'][1] for item in current_group) / len(current_group)
-                        group_position = (int(center_x), int(center_y))
+                        # 如果组内有多个垃圾，设置多垃圾标志
+                        if hasattr(self, 'same_category_threshold') and len(current_group) >= self.same_category_threshold:
+                            is_multi_garbage = True
+                            
+                            # 计算该组的中心点作为位置
+                            center_x = sum(item['position'][0] for item in current_group) / len(current_group)
+                            center_y = sum(item['position'][1] for item in current_group) / len(current_group)
+                            group_position = (int(center_x), int(center_y))
+                            
+                            print(f"发送{current_category}组内的多垃圾，组大小={len(current_group)}，位置={group_position}")
+                        else:
+                            # 单个垃圾，使用该垃圾的位置
+                            highest_conf_item = max(current_group, key=lambda x: x['confidence'])
+                            group_position = highest_conf_item['position']
+                            
+                            print(f"发送{current_category}组内的单个垃圾，位置={group_position}")
                         
-                        print(f"发送{current_category}组内的多垃圾，组大小={len(current_group)}，位置={group_position}")
+                        # 更新组索引，为下一次传输准备
+                        self.current_group_indices[current_category] = current_group_index + 1
                     else:
-                        # 单个垃圾，使用该垃圾的位置
-                        highest_conf_item = max(current_group, key=lambda x: x['confidence'])
-                        group_position = highest_conf_item['position']
-                        
-                        print(f"发送{current_category}组内的单个垃圾，位置={group_position}")
-                    
-                    # 更新组索引，为下一次传输准备
-                    self.current_group_indices[current_category] = current_group_index + 1
-                else:
-                    # 如果所有组都处理完了，移动到下一个类别
-                    self.current_transmission_index += 1
-                    return self._transmit_next()
-        
-        # 如果没有找到有效的组，使用默认方法（最高置信度物体）
-        if group_position is None and items:
+                        # 如果所有组都处理完了，移动到下一个类别
+                        self.current_transmission_index += 1
+                        return self._transmit_next()
+            
+            # 如果没有找到有效的组，使用默认方法（最高置信度物体）
+            if group_position is None and items:
             # 已经在_process_platform_detections中按置信度排序，直接取第一个
             highest_conf_item = items[0]
-            group_position = highest_conf_item['position']
+                group_position = highest_conf_item['position']
             confidence = highest_conf_item['confidence']
             
-            print(f"传输 {current_category} 类别的最高置信度物体: 位置={group_position}, 置信度={confidence:.3f}")
-        elif not items:
-            # 没有物品，移动到下一个类别
-            self.current_transmission_index += 1
-            return self._transmit_next()
+                print(f"传输 {current_category} 类别的最高置信度物体: 位置={group_position}, 置信度={confidence:.3f}")
+            elif not items and group_position is None:
+                # 没有物品，移动到下一个类别
+                self.current_transmission_index += 1
+                return self._transmit_next()
         
         # 发送数据 - 使用统一格式: zxcvbnml
         # z = 类别ID, xcv = x坐标, bnm = y坐标, l = 多垃圾模式(0=单个,1=多个)
@@ -1217,12 +1247,14 @@ class DetectionCore:
         if hasattr(self, 'stm32_response_time'):
             self.stm32_response_time = time.time()
         
-        # 检查是否所有组都已处理完
-        if (hasattr(self, 'current_group_indices') and current_category in self.current_group_indices and 
-            hasattr(self, 'garbage_groups') and current_category in self.garbage_groups and 
-            self.current_group_indices[current_category] >= len(self.garbage_groups[current_category])):
-            # 当前类别的所有组都处理完了，移动到下一个类别
-            self.current_transmission_index += 1
+        # 在强制单垃圾模式下，不更新类别索引，只有当该类别的所有垃圾都处理完才移动到下一个类别
+        if not hasattr(self, 'force_single_garbage') or not self.force_single_garbage:
+            # 检查是否所有组都已处理完
+            if (hasattr(self, 'current_group_indices') and current_category in self.current_group_indices and 
+                hasattr(self, 'garbage_groups') and current_category in self.garbage_groups and 
+                self.current_group_indices[current_category] >= len(self.garbage_groups[current_category])):
+                # 当前类别的所有组都处理完了，移动到下一个类别
+                self.current_transmission_index += 1
             
             # 自动模式下设置为等待状态
         if hasattr(self, 'auto_mode') and self.auto_mode:
@@ -1353,14 +1385,14 @@ class DetectionCore:
                         category = self.categories[id]
 
                         # 在全平台扫描模式下，不需要确认过程，直接添加所有检测结果
-                        detection_info = {
+                    detection_info = {
                             'box': box,
                             'category': category,
                             'confidence': conf,
-                            'position': (center_x, center_y),
+                        'position': (center_x, center_y),
                             'is_small': is_small_object
                         }
-                        current_detections.append(detection_info)
+                    detections.append(detection_info)
         except Exception as e:
             print(f"检测过程发生错误: {e}")
             current_detections = []
@@ -1698,7 +1730,7 @@ class DetectionCore:
         if not hasattr(self, 'same_category_threshold'):
             self.same_category_threshold = 2
         if not hasattr(self, 'multi_garbage_distance_threshold'):
-            self.multi_garbage_distance_threshold = 200
+            self.multi_garbage_distance_threshold = 100  # 降低距离阈值，避免错误分组
             
         # 按类别初始化分组
         category_items = {}
@@ -1712,28 +1744,39 @@ class DetectionCore:
         grouped_items = {}
         for category, items in category_items.items():
             # 如果该类别只有一个物体，不需要分组
-            if len(items) < self.same_category_threshold:
+            if len(items) < 2:  # 修改为2，确保单个物体也能被正确处理
                 if category not in grouped_items:
                     grouped_items[category] = []
                 grouped_items[category].append(items)  # 每个物体单独一组
                 continue
                 
-            # 如果有多个物体，基于距离聚类
+            # 如果有多个物体，优先考虑尺寸差异，避免将不同物体分为一组
             groups = []
-            remaining = items.copy()
+            remaining = sorted(items, key=lambda x: x['box'][2] * x['box'][3], reverse=True)  # 按面积排序
             
             while remaining:
                 current_group = [remaining.pop(0)]  # 从列表中取出第一个元素作为当前组的种子
+                seed_item = current_group[0]
+                seed_box = seed_item['box']
+                seed_area = seed_box[2] * seed_box[3]  # 种子物体的面积
                 center_x, center_y = current_group[0]['position']
                 
                 i = 0
                 while i < len(remaining):
-                    pos_x, pos_y = remaining[i]['position']
+                    item = remaining[i]
+                    pos_x, pos_y = item['position']
+                    item_box = item['box']
+                    item_area = item_box[2] * item_box[3]
+                    
                     # 计算与当前组中心的距离
                     distance = np.sqrt((pos_x - center_x)**2 + (pos_y - center_y)**2)
                     
-                    # 如果距离足够近，加入当前组
-                    if distance < self.multi_garbage_distance_threshold:
+                    # 计算面积比例，避免将大小差异明显的物体分为一组
+                    area_ratio = min(seed_area, item_area) / max(seed_area, item_area)
+                    
+                    # 如果距离足够近且面积比例合理，加入当前组
+                    # 增加面积比例判断，确保大小相似的物体才会被分到一组
+                    if distance < self.multi_garbage_distance_threshold and area_ratio > 0.5:
                         current_group.append(remaining.pop(i))
                         # 更新组中心
                         center_x = sum(item['position'][0] for item in current_group) / len(current_group)
@@ -1745,4 +1788,26 @@ class DetectionCore:
             
             grouped_items[category] = groups
             
+        # 打印分组结果，便于调试
+        for category, groups in grouped_items.items():
+            print(f"类别 {category} 分组结果: {len(groups)}个组")
+            for i, group in enumerate(groups):
+                positions = [item['position'] for item in group]
+                print(f"  组 {i+1}: {len(group)}个物体, 位置: {positions}")
+            
         return grouped_items
+
+    def toggle_force_single_garbage(self):
+        """切换强制单垃圾模式"""
+        if not hasattr(self, 'force_single_garbage'):
+            self.force_single_garbage = False
+            
+        self.force_single_garbage = not self.force_single_garbage
+        status = "启用" if self.force_single_garbage else "禁用"
+        print(f"强制单垃圾模式: {status}")
+        
+        # 如果切换到强制单垃圾模式，重置当前项目索引
+        if self.force_single_garbage:
+            self.current_item_indices = {cat: 0 for cat in self.transmission_order} if hasattr(self, 'transmission_order') else {}
+            
+        return self.force_single_garbage
